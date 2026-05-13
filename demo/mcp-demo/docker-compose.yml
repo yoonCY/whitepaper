@@ -1,0 +1,46 @@
+version: "3.8"
+
+services:
+  # Knowledge Graph (GraphRAG 기반 Entity 저장소)
+  neo4j:
+    image: neo4j:5-community
+    container_name: mcp_demo_neo4j
+    ports:
+      - "7474:7474" # HTTP Browser
+      - "7687:7687" # Bolt Protocol
+    environment:
+      - NEO4J_AUTH=neo4j/mcp-demo-password
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j_data:/data
+    restart: unless-stopped
+
+  # Session Cache (대화 맥락 유지 및 Rate Limiting)
+  redis:
+    image: redis:7-alpine
+    container_name: mcp_demo_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # [Batch Job] Data Indexer Agent (pnpm 환경)
+  data_indexer:
+    build:
+      context: ./1-data-indexer-agent
+      dockerfile: Dockerfile
+    container_name: mcp_demo_indexer
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=mcp-demo-password
+    depends_on:
+      - neo4j
+    # 데모용: 컨테이너가 켜지면 1회성(Batch)으로 데이터를 주입하고 종료됩니다.
+    profiles:
+      - index
+
+volumes:
+  neo4j_data:
+  redis_data:
