@@ -1,0 +1,59 @@
+name: Enterprise MCP Demo CI
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+jobs:
+  # 1. TypeScript 인덱서 테스트 및 빌드 검증
+  indexer-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 8
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - name: Install dependencies
+        working-directory: ./1-data-indexer-agent
+        run: pnpm install
+      - name: Type Check & Lint
+        working-directory: ./1-data-indexer-agent
+        run: pnpm tsc --noEmit
+      - name: Run Tests
+        working-directory: ./1-data-indexer-agent
+        run: pnpm test
+
+  # 2. Rust 서버 테스트 및 빌드 검증
+  serving-agent-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: clippy
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run Cargo Check
+        working-directory: ./2-mcp-serving-agent
+        run: cargo check
+      - name: Run Clippy (Linting)
+        working-directory: ./2-mcp-serving-agent
+        run: cargo clippy -- -D warnings
+      - name: Run Unit Tests
+        working-directory: ./2-mcp-serving-agent
+        run: cargo test
