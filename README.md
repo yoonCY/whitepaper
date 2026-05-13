@@ -23,6 +23,7 @@
 - **Core & Backend:** `Rust`, `TypeScript`, `Node.js`
 - **AI & Data:** `MLX-LM` (Apple Silicon Native), `ChromaDB`, `Python`, `TF-IDF`
 - **Architecture & Protocol:** `MCP` (Model Context Protocol), `CQRS`, `Strangler Fig Pattern`, `Zero-Trust`
+- **Infrastructure:** `Terraform`, `Ansible`, `Kubernetes`, `Apache Kafka`, `ELK Stack`, `AWS (EKS/MSK/OpenSearch)`
 
 ---
 
@@ -85,6 +86,18 @@ graph TD
   * Rust 기반의 EventBus 아키텍처를 통한 비동기 트레이딩/파이프라인 실행
   * Node.js 한계를 극복하기 위한 Strangler 패턴의 하이브리드 언어(Rust + TS) 설계
 
+### 🏗️ [Chapter 4: Infrastructure Core Demo](./demo/infra-core-demo/README.md)
+* **목표:** 실운영 수준의 AWS 기반 인프라 공통 코어 아키텍처 데모
+* **핵심 내용:**
+  * **IaC (Terraform):** VPC → EKS → MSK → OpenSearch 모듈 체이닝 + Remote State (S3/DynamoDB)
+  * **Failback by Design:** Circuit Breaker (Closed/Open/Half-Open) + Redis Fallback + DLQ 패턴
+  * **Kafka 공통 SDK:** 멱등(Idempotent) 프로듀서 + DLQ Consumer + Graceful Shutdown
+  * **BFF 서비스:** 서비스 집계 + 서비스별 독립 Circuit Breaker + Rate Limiting
+  * **ELK 파이프라인:** Filebeat DaemonSet → Logstash (Grok 파싱) → Elasticsearch → Kibana 대시보드
+  * **Config Management (Ansible):** EC2 태그 기반 동적 인벤토리 + Role 기반 멱등 플레이북
+  * **K8s (Kustomize):** PDB + HPA + Anti-Affinity + IRSA + ALB Ingress
+
 ---
 
 *© 2026. 개인 포트폴리오 목적으로 작성되었으며, 실제 상용 서비스의 민감 정보 및 사내 코드는 포함되어 있지 않습니다.*
+

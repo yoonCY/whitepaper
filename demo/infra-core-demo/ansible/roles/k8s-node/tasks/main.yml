@@ -1,0 +1,73 @@
+---
+# Ansible Role: k8s-node
+# 목적: EKS 노드 부트스트랩 (컨테이너 런타임 + kubelet 설정)
+# 참고: EKS Managed Node Group은 대부분 자동화되나
+#       커스텀 AMI나 self-managed 노드 그룹에 필요
+
+- name: "containerd 설치 (컨테이너 런타임)"
+  block:
+    - name: "Docker GPG 키 추가"
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: "Docker 저장소 추가"
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: "containerd 설치"
+      ansible.builtin.apt:
+        name: containerd.io
+        state: present
+        update_cache: true
+
+    - name: "containerd 기본 설정 생성"
+      ansible.builtin.shell: |
+        containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+
+    - name: "SystemdCgroup 활성화 (K8s 권장 cgroup 드라이버)"
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+
+    - name: "containerd 재시작"
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+        enabled: true
+        daemon_reload: true
+  tags: [containerd, container-runtime]
+
+- name: "kubelet 설정 파일 배포"
+  ansible.builtin.template:
+    src: kubelet-config.yaml.j2
+    dest: /etc/kubernetes/kubelet-config.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart_kubelet
+  tags: [kubelet]
+
+- name: "kubelet 추가 인수 설정 (cgroup 드라이버 강제)"
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+    line: 'Environment="KUBELET_EXTRA_ARGS=--cgroup-driver=systemd --container-runtime-endpoint=unix:///run/containerd/containerd.sock"'
+    create: true
+  notify: restart_kubelet
+  tags: [kubelet]
+
+- name: "노드 라벨 설정을 위한 EC2 태그 조회"
+  amazon.aws.ec2_metadata_facts:
+  tags: [aws, node-labels]
+
+- name: "kubelet 노드 라벨 설정"
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/system/kubelet.service.d/20-labels.conf
+    line: "Environment=\"KUBELET_EXTRA_ARGS=--node-labels=topology.kubernetes.io/zone={{ ansible_ec2_placement_availability_zone }},node.kubernetes.io/instance-type={{ ansible_ec2_instance_type }}\""
+    create: true
+  notify: restart_kubelet
+  tags: [kubelet, node-labels]

@@ -1,0 +1,24 @@
+{
+  "name": "@infra-core/kafka-sdk",
+  "version": "1.0.0",
+  "description": "Kafka 공통 SDK — 멱등 프로듀서 + DLQ 패턴 컨슈머",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "producer:demo": "ts-node src/examples/producer-demo.ts",
+    "consumer:demo": "ts-node src/examples/consumer-demo.ts",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "kafkajs": "^2.2.4",
+    "zod": "^3.22.4",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.2"
+  }
+}

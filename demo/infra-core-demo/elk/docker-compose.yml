@@ -1,0 +1,182 @@
+# ELK Stack — 로컬 개발/데모용 Docker Compose
+# 목적: Elasticsearch + Logstash + Kibana + Filebeat 통합 로그 파이프라인
+# 운영 참고: AWS에서는 OpenSearch Service(Managed)로 대체
+
+version: "3.8"
+
+networks:
+  elk:
+    driver: bridge
+    name: infra-core-elk
+
+volumes:
+  elasticsearch-data:
+    driver: local
+  kibana-data:
+    driver: local
+
+services:
+  # ──────────────────────────────────────────
+  # Elasticsearch — 로그 저장소 & 검색 엔진
+  # ──────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.2
+    container_name: elk-elasticsearch
+    environment:
+      - node.name=es-node-1
+      - cluster.name=infra-core-elk
+      - discovery.type=single-node           # 로컬 단일 노드 (운영: multi-node)
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"    # 로컬 메모리 제한
+      - xpack.security.enabled=true          # 보안 활성화 (Zero-Trust)
+      - xpack.security.http.ssl.enabled=false # 로컬: HTTP (운영: HTTPS)
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - elk
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -u elastic:${ELASTIC_PASSWORD:-changeme} http://localhost:9200/_cluster/health | grep -v '\"status\":\"red\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────
+  # Logstash — 로그 수집/파싱/변환 파이프라인
+  # ──────────────────────────────────────────
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.12.2
+    container_name: elk-logstash
+    environment:
+      - "LS_JAVA_OPTS=-Xms256m -Xmx256m"
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme}
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro  # 파이프라인 설정
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+    ports:
+      - "5044:5044"   # Beats 입력 포트
+      - "5000:5000"   # TCP 입력 포트
+      - "9600:9600"   # Logstash 모니터링 API
+    networks:
+      - elk
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────
+  # Kibana — 시각화 대시보드
+  # ──────────────────────────────────────────
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.2
+    container_name: elk-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=elastic
+      - ELASTICSEARCH_PASSWORD=${ELASTIC_PASSWORD:-changeme}
+      - KIBANA_SYSTEM_PASSWORD=${KIBANA_PASSWORD:-changeme}
+      - xpack.security.enabled=true
+      - SERVER_NAME=infra-core-kibana
+    volumes:
+      - kibana-data:/usr/share/kibana/data
+      - ./kibana/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+    ports:
+      - "5601:5601"
+    networks:
+      - elk
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q '\"overall\":{\"level\":\"available\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────
+  # Filebeat — 로그 수집 에이전트
+  # K8s 환경에서는 DaemonSet으로 배포
+  # ──────────────────────────────────────────
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.12.2
+    container_name: elk-filebeat
+    user: root  # /var/lib/docker/containers 접근을 위해 root 필요
+    command: filebeat -e -strict.perms=false
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme}
+    networks:
+      - elk
+    depends_on:
+      - logstash
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────
+  # 로컬 Kafka (ELK 데모용 메시지 소스)
+  # MSK 대신 로컬 Kafka로 파이프라인 테스트
+  # ──────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: elk-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - elk
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: elk-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"  # 명시적 토픽 생성 강제
+    networks:
+      - elk
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # Kafka 토픽 초기화 (헬스체크 후 실행)
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: elk-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      bash -c "
+        echo '===== Kafka 토픽 생성 시작 =====';
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic app-events --partitions 6 --replication-factor 1;
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic app-events-retry --partitions 6 --replication-factor 1;
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic app-events-dlq --partitions 3 --replication-factor 1;
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic bff-audit-logs --partitions 3 --replication-factor 1;
+        echo '===== 토픽 생성 완료 =====';
+        kafka-topics --bootstrap-server kafka:9092 --list;
+      "
+    networks:
+      - elk

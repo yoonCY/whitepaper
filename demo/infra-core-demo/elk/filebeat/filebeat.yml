@@ -1,0 +1,66 @@
+# Filebeat 설정
+# 목적: Docker 컨테이너 로그 자동 수집 → Logstash 전송
+# K8s 운영 시: DaemonSet으로 배포 (k8s/apps/filebeat/ 참조)
+
+filebeat.inputs:
+  # Docker 컨테이너 로그 자동 수집
+  - type: container
+    enabled: true
+    paths:
+      - /var/lib/docker/containers/*/*.log
+    
+    # Docker 라벨/메타데이터 자동 추가
+    processors:
+      - add_docker_metadata:
+          host: "unix:///var/run/docker.sock"
+          match_fields: ["log.file.path"]
+
+      # 서비스 이름 정규화
+      - rename:
+          fields:
+            - from: "container.labels.com_docker_compose_service"
+              to: "service_name"
+          ignore_missing: true
+
+      # 불필요 필드 제거 (Elasticsearch 용량 절약)
+      - drop_fields:
+          fields:
+            - "container.image.tag"
+            - "host.os"
+            - "agent.ephemeral_id"
+          ignore_missing: true
+
+# ──────────────────────────────────────────
+# K8s 환경: Pod 로그 수집 설정
+# (DaemonSet 배포 시 이 섹션 활성화)
+# ──────────────────────────────────────────
+# - type: kubernetes
+#   node: ${NODE_NAME}
+#   hints.enabled: true
+#   hints.default_config:
+#     type: container
+#     paths:
+#       - /var/log/containers/*${data.kubernetes.container.id}*.log
+
+# ──────────────────────────────────────────
+# 출력: Logstash로 전송
+# ──────────────────────────────────────────
+output.logstash:
+  hosts: ["logstash:5044"]
+  loadbalance: true  # 다중 Logstash 인스턴스 로드밸런싱
+
+# 로컬 레지스트리 (이미 수집한 로그 위치 추적 — 재시작 시 중복 방지)
+filebeat.registry.path: /usr/share/filebeat/data/registry
+
+# ──────────────────────────────────────────
+# 모니터링
+# ──────────────────────────────────────────
+monitoring.enabled: false  # 로컬 데모에서는 비활성
+
+# 로그 레벨
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: /var/log/filebeat
+  name: filebeat
+  keepfiles: 3

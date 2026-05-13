@@ -1,0 +1,44 @@
+# AWS EC2 동적 인벤토리 설정
+# 목적: EC2 태그를 기반으로 호스트를 자동으로 그룹화
+# 사용: ansible-inventory -i inventory/aws_ec2.yml --list
+
+plugin: amazon.aws.aws_ec2
+
+regions:
+  - ap-northeast-2
+
+# 필터: 이 프로젝트의 EC2만 조회
+filters:
+  "tag:Project": "infra-core"
+  "instance-state-name": "running"  # 실행 중인 인스턴스만
+
+# 그룹화 규칙 (EC2 태그 기반)
+keyed_groups:
+  # Role 태그로 그룹화: tag_Role_bastion, tag_Role_k8s_node
+  - key: tags.Role
+    prefix: tag_Role
+    separator: "_"
+  # Environment 태그로 그룹화: tag_Environment_dev, tag_Environment_prod
+  - key: tags.Environment
+    prefix: tag_Environment
+    separator: "_"
+  # 인스턴스 타입으로 그룹화 (성능 기반 태스크 분기에 활용)
+  - key: instance_type
+    prefix: instance_type
+
+# 호스트 접속 설정
+# Bastion을 통한 점프 호스트 연결 (Zero-Trust: 직접 SSH 불가)
+compose:
+  ansible_host: private_ip_address
+  ansible_ssh_common_args: >
+    -o StrictHostKeyChecking=no
+    -o ProxyJump=ubuntu@{{ hostvars[groups['tag_Role_bastion'][0]]['public_ip_address'] }}
+
+# 호스트 변수 자동 설정
+hostnames:
+  - private-ip-address
+
+# Bastion은 퍼블릭 IP 사용
+groups:
+  bastion: "'bastion' in tags.Role"
+  k8s_nodes: "'k8s-node' in tags.Role"

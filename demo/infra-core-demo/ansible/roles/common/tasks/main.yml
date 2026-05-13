@@ -1,0 +1,130 @@
+---
+# Ansible Role: common
+# 목적: 모든 호스트에 적용할 OS 공통 설정
+# 멱등성: 재실행 안전 (모든 태스크 changed_when 또는 idempotent 조건 포함)
+
+# tasks/main.yml
+- name: "패키지 캐시 업데이트"
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+  tags: [packages]
+
+- name: "필수 패키지 설치"
+  ansible.builtin.apt:
+    name:
+      - curl
+      - wget
+      - git
+      - unzip
+      - jq
+      - htop
+      - vim
+      - net-tools
+      - ntp
+      - chrony
+      - python3
+      - python3-pip
+      - ca-certificates
+      - gnupg
+      - lsb-release
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: [packages]
+
+- name: "NTP(chrony) 활성화 및 시작"
+  ansible.builtin.systemd:
+    name: chrony
+    state: started
+    enabled: true
+  tags: [ntp]
+
+- name: "불필요 서비스 비활성화 (보안 강화)"
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - snapd
+    - ufw  # AWS 환경에서는 SG로 제어
+  ignore_errors: true
+  tags: [security]
+
+- name: "sysctl 최적화 (네트워크 성능 + K8s 요구사항)"
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_set: true
+    state: present
+    reload: true
+  loop:
+    # K8s 필수: netfilter bridge 설정
+    - { key: "net.bridge.bridge-nf-call-iptables",  value: "1" }
+    - { key: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+    - { key: "net.ipv4.ip_forward",                  value: "1" }
+    # 네트워크 성능 최적화
+    - { key: "net.core.somaxconn",                   value: "65535" }
+    - { key: "net.core.netdev_max_backlog",           value: "5000" }
+    - { key: "net.ipv4.tcp_max_syn_backlog",          value: "8192" }
+    - { key: "net.ipv4.tcp_tw_reuse",                 value: "1" }
+    # 파일 디스크립터 한도
+    - { key: "fs.file-max",                           value: "2097152" }
+    - { key: "vm.swappiness",                         value: "10" }
+    # Kafka 최적화: 소켓 버퍼
+    - { key: "net.core.rmem_max",                     value: "134217728" }
+    - { key: "net.core.wmem_max",                     value: "134217728" }
+  tags: [sysctl, k8s-prereq]
+
+- name: "br_netfilter 커널 모듈 로드 (K8s 필수)"
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+    persistent: present
+  loop:
+    - br_netfilter
+    - overlay
+  tags: [k8s-prereq]
+
+- name: "ulimit 설정 (파일 디스크립터 한도)"
+  community.general.pam_limits:
+    domain: "*"
+    limit_type: "{{ item.type }}"
+    limit_item: nofile
+    value: "{{ item.value }}"
+  loop:
+    - { type: soft, value: 1048576 }
+    - { type: hard, value: 1048576 }
+  tags: [ulimit]
+
+- name: "SSH 보안 강화 (Zero-Trust)"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    state: present
+    backup: true
+  loop:
+    - { regexp: "^#?PermitRootLogin",    line: "PermitRootLogin no" }
+    - { regexp: "^#?PasswordAuthentication", line: "PasswordAuthentication no" }
+    - { regexp: "^#?PubkeyAuthentication",   line: "PubkeyAuthentication yes" }
+    - { regexp: "^#?X11Forwarding",          line: "X11Forwarding no" }
+    - { regexp: "^#?MaxAuthTries",           line: "MaxAuthTries 3" }
+    - { regexp: "^#?ClientAliveInterval",    line: "ClientAliveInterval 300" }
+    - { regexp: "^#?ClientAliveCountMax",    line: "ClientAliveCountMax 2" }
+  notify: restart_sshd
+  tags: [security, ssh]
+
+- name: "CloudWatch Agent 설치 (AWS 메트릭 수집)"
+  block:
+    - name: "CloudWatch Agent 패키지 다운로드"
+      ansible.builtin.get_url:
+        url: "https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb"
+        dest: /tmp/amazon-cloudwatch-agent.deb
+        mode: "0644"
+    - name: "CloudWatch Agent 설치"
+      ansible.builtin.apt:
+        deb: /tmp/amazon-cloudwatch-agent.deb
+        state: present
+  when: install_cloudwatch_agent | default(true)
+  tags: [monitoring, aws]

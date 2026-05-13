@@ -1,0 +1,51 @@
+# Terraform
+**/.terraform/
+**/.terraform.lock.hcl
+**/terraform.tfstate
+**/terraform.tfstate.backup
+**/tfplan
+**/*.tfplan
+**/override.tf
+**/*.auto.tfvars
+
+# Node.js
+**/node_modules/
+**/dist/
+**/build/
+**/.env
+**/*.log
+**/npm-debug.log*
+
+# Docker
+**/.docker/
+
+# Ansible
+**/*.retry
+**/.vault_pass
+**/vault_pass.txt
+ansible/roles/*/files/secret*
+
+# K8s
+**/*.kubeconfig
+**/kubeconfig
+
+# 시크릿
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+**/.env.local
+**/.env.production
+**/secrets.yml
+**/secrets.yaml
+
+# IDE
+**/.vscode/
+**/.idea/
+**/*.swp
+**/*.swo
+**/.DS_Store
+
+# 테스트 커버리지
+**/coverage/
+**/.nyc_output/

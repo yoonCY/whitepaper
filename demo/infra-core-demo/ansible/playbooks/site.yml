@@ -1,0 +1,28 @@
+---
+# Ansible 통합 플레이북 (site.yml)
+# 사용: ansible-playbook -i inventory/aws_ec2.yml playbooks/site.yml
+
+# 1단계: 모든 호스트 공통 설정
+- name: "공통 OS 설정 적용"
+  hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - role: common
+      tags: [common]
+
+# 2단계: Bastion 호스트 설정
+- name: "Bastion 호스트 설정"
+  hosts: tag_Role_bastion
+  become: true
+  roles:
+    - role: bastion
+      tags: [bastion]
+
+# 3단계: K8s 노드 부트스트랩
+- name: "K8s 노드 초기화"
+  hosts: tag_Role_k8s_node
+  become: true
+  roles:
+    - role: k8s-node
+      tags: [k8s-node]

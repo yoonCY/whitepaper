@@ -1,0 +1,148 @@
+---
+# Kafka Consumer Worker — K8s Deployment
+# 특징:
+# - DLQ 패턴 적용
+# - Graceful Shutdown (terminationGracePeriodSeconds=60)
+# - PDB로 롤링 업데이트 시 컨슈머 가용성 보장
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-consumer
+  namespace: infra-core
+  labels:
+    app: kafka-consumer
+    component: worker
+spec:
+  # 컨슈머는 파티션 수에 맞게 레플리카 조정
+  # 파티션 6개 → 최대 6개 레플리카 (초과 시 유휴 컨슈머 발생)
+  replicas: 2
+  selector:
+    matchLabels:
+      app: kafka-consumer
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: kafka-consumer
+        component: worker
+      annotations:
+        co.elastic.logs/enabled: "true"
+        co.elastic.logs/json.keys_under_root: "true"
+    spec:
+      serviceAccountName: kafka-consumer-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+
+      # Spot 인스턴스 우선 배치 (비용 효율)
+      tolerations:
+        - key: "kubernetes.azure.com/scalesetpriority"
+          operator: "Equal"
+          value: "spot"
+          effect: "NoSchedule"
+
+      containers:
+        - name: kafka-consumer
+          image: ACCOUNT_ID.dkr.ecr.ap-northeast-2.amazonaws.com/infra-core/kafka-consumer:latest
+          imagePullPolicy: Always
+
+          envFrom:
+            - configMapRef:
+                name: kafka-consumer-config
+          env:
+            - name: KAFKA_SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-secrets
+                  key: sasl-password
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+
+          # 컨슈머에는 HTTP 헬스체크 대신 exec probe 사용
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f 'node' > /dev/null"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # Graceful Shutdown: SIGTERM → 현재 메시지 처리 완료 후 종료
+      # Kafka Consumer는 60초 여유를 줘서 현재 배치 처리 완료 보장
+      terminationGracePeriodSeconds: 60
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-consumer-config
+  namespace: infra-core
+data:
+  NODE_ENV: "production"
+  KAFKA_BROKERS: "broker1:9096,broker2:9096,broker3:9096"
+  KAFKA_CONSUMER_GROUP: "infra-core-workers"
+  KAFKA_TOPIC: "app-events"
+  KAFKA_DLQ_TOPIC: "app-events-dlq"
+  KAFKA_MAX_RETRIES: "3"
+  KAFKA_RETRY_DELAY_MS: "1000"
+  KAFKA_SASL_MECHANISM: "scram-sha-512"
+  KAFKA_SASL_USERNAME: "kafka-consumer"
+  LOG_LEVEL: "info"
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kafka-consumer-pdb
+  namespace: infra-core
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: kafka-consumer
+
+---
+# KEDA (Kubernetes Event-Driven Autoscaling) — 선택적 확장 포인트
+# Kafka Consumer Lag 기반 자동 스케일링
+# 설치 필요: helm install keda kedacore/keda
+# apiVersion: keda.sh/v1alpha1
+# kind: ScaledObject
+# metadata:
+#   name: kafka-consumer-scaler
+#   namespace: infra-core
+# spec:
+#   scaleTargetRef:
+#     name: kafka-consumer
+#   minReplicaCount: 1
+#   maxReplicaCount: 6
+#   triggers:
+#     - type: kafka
+#       metadata:
+#         bootstrapServers: "broker1:9096,broker2:9096"
+#         consumerGroup: "infra-core-workers"
+#         topic: "app-events"
+#         lagThreshold: "100"  # 100개 이상 lag 발생 시 스케일 아웃

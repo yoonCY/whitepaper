@@ -1,0 +1,297 @@
+# BFF 서비스 Kubernetes 배포 매니페스트
+# Kustomize base: overlays/dev 및 overlays/prod에서 패치
+
+---
+# ──────────────────────────────────────────
+# Deployment (BFF 서버)
+# ──────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bff
+  namespace: infra-core
+  labels:
+    app: bff
+    component: gateway
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: bff
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1       # 배포 중 최대 초과 Pod 수
+      maxUnavailable: 0 # 배포 중 최소 가용 보장 (Zero-downtime)
+  template:
+    metadata:
+      labels:
+        app: bff
+        component: gateway
+        version: v1
+      annotations:
+        # Filebeat가 이 Pod의 로그를 JSON으로 파싱하도록 힌트
+        co.elastic.logs/enabled: "true"
+        co.elastic.logs/json.keys_under_root: "true"
+        co.elastic.logs/json.add_error_key: "true"
+    spec:
+      serviceAccountName: bff-sa
+      
+      # 보안 컨텍스트 (Zero-Trust: 비특권 실행)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+
+      # Pod Anti-Affinity: 동일 노드에 BFF Pod 중복 배치 방지
+      # Failback: 노드 장애 시 다른 노드의 Pod은 계속 서비스
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values: [bff]
+                topologyKey: kubernetes.io/hostname
+        # 여러 AZ에 분산 배치 (가능한 경우)
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              preference:
+                matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: In
+                    values: [ap-northeast-2a, ap-northeast-2b, ap-northeast-2c]
+
+      containers:
+        - name: bff
+          image: ACCOUNT_ID.dkr.ecr.ap-northeast-2.amazonaws.com/infra-core/bff:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+
+          # 환경변수 (ConfigMap + Secret 분리)
+          envFrom:
+            - configMapRef:
+                name: bff-config
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: bff-secrets
+                  key: redis-password
+
+          # 리소스 제한 (QoS: Burstable)
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          # Liveness Probe: 프로세스 데드락 감지
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          # Readiness Probe: 트래픽 수신 준비 확인
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          # Startup Probe: 느린 초기 기동 허용
+          startupProbe:
+            httpGet:
+              path: /healthz/live
+              port: 3000
+            failureThreshold: 30
+            periodSeconds: 5
+
+          # 컨테이너 보안 (Zero-Trust)
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # Graceful Shutdown: SIGTERM 후 30초 대기
+      terminationGracePeriodSeconds: 30
+
+---
+# ──────────────────────────────────────────
+# Service (ClusterIP — ALB Ingress가 라우팅)
+# ──────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: bff
+  namespace: infra-core
+  labels:
+    app: bff
+spec:
+  type: ClusterIP
+  selector:
+    app: bff
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+      protocol: TCP
+
+---
+# ──────────────────────────────────────────
+# HPA (Horizontal Pod Autoscaler)
+# CPU 70% 초과 시 자동 스케일 아웃
+# ──────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: bff-hpa
+  namespace: infra-core
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: bff
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300  # 스케일 다운은 5분 안정화 후
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+
+---
+# ──────────────────────────────────────────
+# PodDisruptionBudget
+# Failback 핵심: 노드 드레인/업그레이드 시 최소 가용 보장
+# ──────────────────────────────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: bff-pdb
+  namespace: infra-core
+spec:
+  minAvailable: 1  # 항상 최소 1개 Pod 가용 보장
+  selector:
+    matchLabels:
+      app: bff
+
+---
+# ──────────────────────────────────────────
+# ServiceAccount (IRSA: Pod별 IAM 역할)
+# ──────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bff-sa
+  namespace: infra-core
+  annotations:
+    # IRSA: 이 Pod에 부여할 IAM 역할 ARN
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/infra-core-bff-role
+
+---
+# ──────────────────────────────────────────
+# ConfigMap (환경 설정)
+# ──────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bff-config
+  namespace: infra-core
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  LOG_LEVEL: "info"
+  REDIS_HOST: "redis-master.infra-core.svc.cluster.local"
+  REDIS_PORT: "6379"
+  USER_SERVICE_URL: "http://user-service.infra-core.svc.cluster.local:8080"
+  PRODUCT_SERVICE_URL: "http://product-service.infra-core.svc.cluster.local:8080"
+  ORDER_SERVICE_URL: "http://order-service.infra-core.svc.cluster.local:8080"
+  ALLOWED_ORIGINS: "https://app.example.com"
+
+---
+# ──────────────────────────────────────────
+# ALB Ingress (AWS Load Balancer Controller)
+# ──────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bff-ingress
+  namespace: infra-core
+  annotations:
+    kubernetes.io/ingress.class: "alb"
+    alb.ingress.kubernetes.io/scheme: "internet-facing"
+    alb.ingress.kubernetes.io/target-type: "ip"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:ap-northeast-2:ACCOUNT_ID:certificate/CERT_ID"
+    alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-TLS13-1-2-2021-06"
+    alb.ingress.kubernetes.io/healthcheck-path: "/healthz/ready"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+spec:
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /api/
+            pathType: Prefix
+            backend:
+              service:
+                name: bff
+                port:
+                  number: 80
+          - path: /healthz/
+            pathType: Prefix
+            backend:
+              service:
+                name: bff
+                port:
+                  number: 80

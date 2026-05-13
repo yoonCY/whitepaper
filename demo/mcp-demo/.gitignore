@@ -1,0 +1,13 @@
+# OS / Environment
+.DS_Store
+.env
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker (Optional ignore if not checked in)
+# .dockerignore handles this, but good to have here just in case
+# docker-compose.override.yml

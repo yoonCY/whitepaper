@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra-core
+  labels:
+    name: infra-core
+    environment: dev
+    managed-by: kustomize
+  annotations:
+    # 네임스페이스 생성자 정보 (감사 추적)
+    owner: "platform-team"
+    purpose: "infra-core-demo 워크로드 격리"
