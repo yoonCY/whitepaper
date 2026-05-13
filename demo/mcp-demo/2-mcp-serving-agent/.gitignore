@@ -1,0 +1,10 @@
+# Rust 빌드 산출물
+/target/
+
+# 환경 변수 및 로컬 설정
+.env
+
+# 평가 및 로그 데이터
+*.log
+*.jsonl
+metrics.jsonl
